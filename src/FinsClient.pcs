@@ -1,0 +1,638 @@
+'!TITLE "TCP Omron Fins Communication Library"
+#Include "FinsClient.h"
+
+Sub Main
+
+	Call FinsInit(tcpClientLine)
+
+End Sub
+
+Sub FinsInit(clientLine As Integer)
+
+	tcpClientLine = clientLine
+
+	' Close the previous communication if it's still open
+	If Comm.State(tcpClientLine) > 0 Then
+
+		Comm.Clear tcpClientLine
+		Comm.Close tcpClientLine
+
+	End If
+
+	' Open the TCP client
+	Comm.Open tcpClientLine
+
+	' Wait for the connection
+	Wait Comm.State(tcpClientLine) = 2
+
+	' Clear the buffer
+	Comm.Clear tcpClientLine
+
+	' Initialize the FINS communication and retrieve the node IDs
+	Call HandShake()
+
+	' Retrieve the PLC model and version
+	Call ReadCPUUnitDataRequest()
+
+End Sub
+
+Sub HandShake()
+
+	Dim data As Variant
+	Dim toSend As Variant
+
+	data = CreateArray(4, VT_UI1)
+
+	toSend = BuildFinsMessage(0, data)
+	
+	Comm.Output tcpClientLine, toSend, 2000
+
+	Dim response As Variant
+
+	response = ReceiveFinsMessage(TCP_CMD_NODEADDRFROMPLC, 2000)
+
+	If GetArrayCount(response) < 8 Then
+
+		' TODO: Throw an error
+
+	End If
+
+	If response(3) = 0 Or response(3) = 255 Then
+
+		' TODO: Throw an error
+
+	End If
+
+	localNodeId = response(3)
+
+	If response(7) = 0 Or response(7) = 255 Then
+
+		' TODO: Throw an error
+
+	End If
+
+	remoteNodeId = response(7)
+
+End Sub
+
+Sub ReadMemoryBitRequest(dataType As Integer, address As Integer, startBitIndex As Integer, length As Integer)
+
+	Dim data As Variant
+
+	data = CreateArray(6, VT_UI1)
+	
+	' Memory area data type
+	data(0) = (dataType And &HFF)
+
+	' Address
+	data(1) = ((address >> 8) And &HFF)
+	data(2) = (address And &HFF)
+
+	' Bit index
+	data(3) = (startBitIndex And &HFF)
+
+	' Length
+	data(4) = ((length >> 8) And &HFF)
+	data(5) = (length And &HFF)
+
+End Sub
+
+Function ReadMemoryAreaWordRequest(dataType As Integer, startAddress As Integer, length As Integer) As Variant
+
+	Dim data As Variant
+
+	data = CreateArray(6, VT_UI1)
+
+	' Memory area data type
+	data(0) = (dataType And &HFF)
+
+	' Address
+	data(1) = ((startAddress >> 8) And &HFF)
+	data(2) = (startAddress And &HFF)
+
+	' Reserved
+	data(3) = &H00
+
+	' Length
+	data(4) = ((length >> 8) And &HFF)
+	data(5) = (length And &HFF)
+
+	Dim response As Variant
+
+	' Build the request
+	response = ProcessFinsRequest(FUNC_MEMORYAREA, MEMORYAREA_READ, data)
+
+	If GetArrayCount(response) < (length * 2) Then
+
+		' TODO: Throw an exception
+
+	End If
+
+	' NOTE: For some unknown reason the robot doesn't have the word type for arrays
+	'		resulting in exceptions when there's some kind of asignment to a word type.
+	'		We are better off leaving it in bytes even tho it kinda sucks.
+
+	ReadMemoryAreaWordRequest = response
+
+End Function
+
+Sub WriteMemoryAreaBitRequest(dataType As Integer, address As Integer, startBitIndex As Integer, values As Variant)
+
+	Dim data As Variant
+
+	data = CreateArray(6 + GetArrayCount(values), VT_UI1)
+
+	' Memory area data type
+	data(0) = (dataType And &HFF)
+
+	' Address
+	data(1) = ((address >> 8) And &HFF)
+	data(2) = (address And &HFF)
+
+	' Bit index
+	data(3) = (startBitIndex And &HFF)
+
+	' Length
+	data(4) = ((GetArrayCount(values) >> 8) And &HFF)
+	data(5) = (GetArrayCount(values) And &HFF)
+
+	' Bit values
+	Dim index As Integer
+
+	For index = 0 To UBound(values)
+
+		data(6 + index) = (values(index) And &HFF)
+
+	Next
+
+End Sub
+
+Sub WriteMemoryAreaWordRequest(dataType As Integer, startAddress As Integer, values As Variant)
+
+	Dim data As Variant
+
+	data = CreateArray(6 + GetArrayCount(values), VT_UI1)
+
+	' Memory area data type
+	data(0) = (dataType And &HFF)
+
+	' Address
+	data(1) = ((startAddress >> 8) And &HFF)
+	data(2) = (startAddress And &HFF)
+
+	' Reserved
+	data(3) = &H00
+
+	' Length
+	data(4) = ((GetArrayCount(values) >> 8) And &HFF)
+	data(5) = (GetArrayCount(values) And &HFF)
+
+	' Word values
+	Dim index As Integer
+
+	For index = 0 To UBound(values)
+
+		data(6 + index) = (values(index) And &HFF)
+
+	Next
+
+	Dim response As Variant
+
+	' Build the request
+	response = ProcessFinsRequest(FUNC_MEMORYAREA, MEMORYAREA_WRITE, data)
+
+	' TODO: Validate the response
+
+End Sub
+
+Sub ReadCPUUnitDataRequest()
+
+	Dim data As Variant
+
+	data = CreateArray(1, VT_UI1)
+
+	data(0) = &H00
+
+	Dim response As Variant
+
+	' Build the request
+	response = ProcessFinsRequest(FUNC_MACHINECONFIG, MACHINECONFIG_READCPU, data)
+
+	Dim controllerModel As String
+	Dim controllerVersion As String
+
+	' Parse the controller model
+	controllerModel = ExtractStringValue(response, 0, CTRL_MODEL_LENGTH)
+	' Parse the controller version
+	controllerVersion = ExtractStringValue(response, CTRL_MODEL_LENGTH, CTRL_VERSION_LENGTH)
+
+	' TODO: Check the controller model & version
+
+End Sub
+
+Function ProcessFinsRequest(functionCode As Integer, subFunctionCode As Integer, requestData As Variant) As Variant
+
+	Dim message As Variant
+	Dim serviceId As Integer
+
+	serviceId = GetNextRequestId()
+
+	' Build the request message
+	message = BuildFinsRequest(functionCode, subFunctionCode, serviceId, requestData)
+
+	' Build the FINS message
+	message = BuildFinsMessage(TCP_CMD_FINSFRAME, message)
+
+	' Send the data
+	Comm.Output tcpClientLine, message
+
+	Dim response As Variant
+
+	' Read the response
+	response = ReceiveFinsMessage(TCP_CMD_FINSFRAME, 2000)
+
+	If GetArrayCount(response) < CTRL_MODEL_LENGTH + CTRL_VERSION_LENGTH + SYS_RESERVED_LENGTH + AREA_DATA_LENGTH Then
+
+		' TODO: Throw an exception
+
+	End If
+
+	' Validate the response
+	If GetArrayCount(response) < FINS_HEADER_LENGTH + FINS_CMD_LENGTH + FINS_RE_CODE_LENGTH Then
+
+		' TODO: Throw an exception
+
+	End If
+
+	' Validate the function code
+
+	' NOTE: There's no nice way to do it in here
+	'		Unless we make something like an array
+	Select Case response(10)
+
+		Case FUNC_MEMORYAREA, FUNC_PARAMETERAREA, FUNC_PROGRAMAREA, _
+			FUNC_OPERATINGMODE, FUNC_MACHINECONFIG, FUNC_STATUS, _
+			FUNC_TIMEDATA, FUNC_MESSAGEDISPLAY, FUNC_ACCESSRIGHTS, _
+			FUNC_ERRORLOG, FUNC_FINSWRITELOG, FUNC_FILEMEMORY, _
+			FUNC_DEBUGGING, FUNC_SERIALGATEWAY
+
+		Case Else
+			' TODO: Throw an exception
+
+	End Select
+
+	' Validate the service Id
+	If serviceId <> response(9) Then
+
+		' TODO: Throw an exception
+
+	End If
+
+	' Validate the function code
+	If functionCode <> response(10) Then
+
+		' TODO: Throw an exception
+
+	End If
+
+	' Validate the sub function code
+	If subFunctionCode <> response(11) Then
+
+		' TODO: Throw an exception
+
+	End If
+
+	' TODO: Validate the response code
+
+	If GetArrayCount(response) > FINS_HEADER_LENGTH + FINS_CMD_LENGTH + FINS_RE_CODE_LENGTH Then
+
+		ProcessFinsRequest = TakeFromArray(response, FINS_HEADER_LENGTH + FINS_CMD_LENGTH + FINS_RE_CODE_LENGTH, GetArrayCount(response) - (FINS_HEADER_LENGTH + FINS_CMD_LENGTH + FINS_RE_CODE_LENGTH))
+
+	End If
+
+End Function
+
+Function ExtractStringValue(bArray As Variant, startIndex As Integer, length As String) As String
+
+	Dim res As String
+	Dim index As Integer
+
+	For index = 0 To length - 1
+
+		res = res & Chr(bArray(startIndex + index))
+
+	Next
+
+	ExtractStringValue = res
+
+End Function
+
+Function BuildFinsMessage(commandCode As Integer, data As Variant) As Variant
+
+	Dim message As Variant
+
+	' NOTE: Maybe use LenB?
+	message = CreateArray(TCP_HEADER_LENGTH + GetArrayCount(data), VT_UI1)
+
+	'
+	' FINS Message Identifier
+	'
+
+	message(0) = &H46 ' F
+	message(1) = &H49 ' I
+	message(2) = &H4E ' N
+	message(3) = &H53 ' S
+
+	'
+	' Length of Message
+	'
+
+	' Command + Error Code + Message Data
+	Dim dLength As Integer
+
+	dLength = 4 + 4 + GetArrayCount(data)
+
+	' NOTE: The order is reversed
+	message(4) = ((dLength >> 24) And &HFF)
+	message(5) = ((dLength >> 16) And &HFF)
+	message(6) = ((dLength >> 8) And &HFF)
+	message(7) = (dLength And &HFF)
+
+	'
+	' Command
+	'
+
+	message(8) = &H00
+	message(9) = &H00
+	message(10) = &H00
+	message(11) = (commandCode And &HFF)
+
+	'
+	' Error Code
+	'
+
+	message(12) = &H00
+	message(13) = &H00
+	message(14) = &H00
+	message(15) = &H00
+
+	Dim dIndex As Integer
+
+	For dIndex = 0 To UBound(data)
+
+		message(16 + dIndex) = (data(dIndex) And &HFF)
+
+	Next
+
+	BuildFinsMessage = message
+
+End Function
+
+Function ReceiveFinsMessage(command As Integer, timeout As Integer) As Variant
+
+	Dim receivedDataCount As Integer
+	Dim receivedData As Variant
+
+	' TODO: Add a timeout
+
+	' Receive the header
+	receivedData = Comm.Input(tcpClientLine, 2000, TCP_HEADER_LENGTH)
+
+	If GetArrayCount(receivedData) = 0 Then
+
+		' TODO: Throw an error
+
+	End If
+
+	If GetArrayCount(receivedData) < TCP_HEADER_LENGTH Then
+
+		' TODO: Throw an error
+
+	End If
+
+	' Check FINS header
+	If receivedData(0) <> &H46 Or receivedData(1) <> &H49 Or receivedData(2) <> &H4E Or receivedData(3) <> &H53 Then
+
+		' TODO: Throw an error
+
+	End If
+
+	' Parse the message length
+	Dim messageDataLength As Integer
+
+	messageDataLength = (((receivedData(4) And &HFF) << 24) Or (receivedData(5) And &HFF << 16) Or (receivedData(6) And &HFF << 8) Or (receivedData(7) And &HFF)) - 8
+
+	If messageDataLength <= 0 Or messageDataLength > 32767 Then
+
+		' TODO: Throw an error
+
+	End If
+
+	If receivedData(11) == 3 Or receivedData(15) <> 0 Then
+
+		Select Case receivedData(15)
+
+			Case 1
+				
+				' TODO: Throw an error
+
+			Case 2
+				
+				' TODO: Throw an error
+
+			Case 3
+
+				' TODO: Throw an error
+
+			Case 20
+
+				' TODO: Throw an error
+
+			Case 21
+
+				' TODO: Throw an error
+
+			Case 22
+
+				' TODO: Throw an error
+
+			Case 23
+
+				' TODO: Throw an error
+
+			Case 24
+
+				' TODO: Throw an error
+
+			Case 25
+
+				' TODO: Throw an error
+
+			Case Else
+
+				' TOD: Throw an error
+
+		End Select
+
+	End If
+
+	If receivedData(8) <> 0 Or receivedData(9) <> 0 Or receivedData(10) <> 0 Or receivedData(11) <> (command And &HFF) Then
+
+		' TODO: Throw an error
+
+	End If
+
+	If command = TCP_CMD_FINSFRAME And messageDataLength < FINS_HEADER_LENGTH + FINS_CMD_LENGTH + FINS_RE_CODE_LENGTH Then
+
+		' TODO: Throw an error
+
+	End If
+
+	' TODO: Calculate the remaining time for the defined timeout
+	receivedData = Comm.Input(tcpClientLine, 2000, messageDataLength)
+
+	If GetArrayCount(receivedData) = 0 Then
+
+		' TODO: Throw an error
+
+	End If
+
+	If GetArrayCount(receivedData) < messageDataLength Then
+
+		' TODO: Throw an error
+
+	End If
+
+	If command = TCP_CMD_FINSFRAME And receivedData(0) <> &HC0 And receivedData(0) <> &HC1 Then
+
+		' TODO: Throw an error
+
+	End If
+
+	ReceiveFinsMessage = receivedData
+
+End Function
+
+Function BuildFinsRequest(functionCode As Integer, subFunctionCode As Integer, serviceId As Integer, data As Variant) As Variant
+
+	Dim message As Variant
+	
+	message = CreateArray(FINS_HEADER_LENGTH + FINS_CMD_LENGTH + GetArrayCount(data), VT_UI1)
+
+	'
+	' Header Section
+	'
+
+	' Information control field
+	message(0) = &H80
+
+	' Reserved by System
+	message(1) = &H00
+
+	' Permissible Number of Gateways
+	message(2) = &H02
+
+	' Destination Network Address (Local Network)
+	message(3) = &H00
+
+	' Destination Node Address
+	' 0 = Local PLC Unit
+	' 1 to 254 = Destination Node Address
+	' 255 = Broadcasting
+	message(4) = (remoteNodeId And &HFF)
+
+	' Destination Unit Address (PLC - CPU Unit)
+	message(5) = &H00
+
+	' Source Network Address (Local Network)
+	message(6) = &H00
+
+	' Source Node Address (Local Server)
+	message(7) = (localNodeId And &HFF)
+
+	' Source Unit Address
+	message(8) = &H00
+
+	' Service ID
+	message(9) = (serviceId And &HFF)
+
+	'
+	' Command Section
+	'
+
+	' Main Function Code
+	message(10) = (functionCode And &HFF)
+
+	' Sub Function Code
+	message(11) = (subFunctionCode And &HFF)
+
+	'
+	' Data Section
+	'
+
+	Dim dIndex As Integer
+
+	' Request data
+	For dIndex = 0 To UBound(data)
+
+		message(12 + dIndex) = (data(dIndex) And &Hff)
+
+	Next
+
+	BuildFinsRequest = message
+	
+End Function
+
+Function GetNextRequestId() As Integer
+
+	If currRequestId = BYTE_MAX_VALUE Then
+
+		currRequestId = BYTE_MIN_VALUE
+
+	Else
+
+		currRequestId = currRequestId + 1
+
+	End If
+
+	GetNextRequestId = currRequestId
+
+End Function
+
+Function GetArrayCount(inputArray As Variant) As Integer
+
+	' Handle empty variant
+	On Error GoTo lbReturnNull
+
+	GetArrayCount = UBound(inputArray) + 1
+
+	Exit Function
+
+lbReturnNull:
+	GetArrayCount = 0
+
+End Function
+
+Function TakeFromArray(inputArray As Variant, startIndex As Integer, length As Integer) As Variant
+
+	If GetArrayCount(inputArray) = 0 Or (GetArrayCount(inputArray) - length) <= 0 Then
+
+		' TODO: Error
+
+	End If
+
+	Dim resArray As Variant
+	Dim index As Integer
+
+	' TODO: Check array type?
+	resArray = CreateArray(length, VT_UI1)
+
+	For index = 0 To UBound(resArray)
+
+		resArray(index) = inputArray(startIndex + index)
+
+	Next
+
+	TakeFromArray = resArray
+
+End Function

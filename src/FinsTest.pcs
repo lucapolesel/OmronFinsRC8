@@ -1,0 +1,79 @@
+'!TITLE "Robot program"
+#Include "FinsClient.pcs"
+
+Sub Main
+
+	' Init the FINS communication
+	Call FinsInit(8)
+
+	Dim startTime As Integer
+	Dim elapsedTime As Integer
+	Dim totalTime As Integer
+	Dim runs As Integer
+
+	D[11] = -1
+	D[12] = 99999
+
+	DefIO sampleRead(15) = Byte, 170
+	DefIO sampleWrite(15) = Byte, 330
+
+	DefIO sampleInteger = Integer, 330
+
+	While True
+
+		startTime = Timer
+
+		Dim words As Variant
+		Dim index As Variant
+
+		' Try to read
+		words = ReadMemoryAreaWordRequest(MEMORYAREA_TYPE_WORK, 0, 8)
+
+		For index = 0 To UBound(words)
+
+			sampleRead(index) = words(index)
+
+		Next
+
+		' Write an integer
+		sampleInteger = currRequestId
+
+		Dim bytesToWrite As Variant
+
+		bytesToWrite = CreateArray(16, VT_UI2)
+
+		For index = 0 To UBound(bytesToWrite)
+
+			bytesToWrite(index) = sampleWrite(index)
+
+		Next
+
+		' Try to write
+		Call WriteMemoryAreaWordRequest(MEMORYAREA_TYPE_DATAMEM, 0, bytesToWrite)
+
+		runs = runs + 1
+
+		elapsedTime = Timer - startTime
+		totalTime = totalTime + elapsedTime
+
+		If elapsedTime > D[11] Then
+
+			D[11] = elapsedTime
+
+		End If
+
+		If elapsedTime < D[12] Then
+
+			D[12] = elapsedTime
+
+		End If
+
+		' Curr time
+		D[10] = elapsedTime
+		' Median time
+		D[13] = (D[13] * ((runs - 1) / runs) + (elapsedTime) / runs)
+		D[14] = runs
+
+	WEnd
+	
+End Sub
